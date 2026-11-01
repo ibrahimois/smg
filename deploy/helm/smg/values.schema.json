@@ -95,6 +95,7 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
           }
         },
+        "servicerImpl": { "type": "string", "enum": ["", "python", "rust"] },
         "metrics": {
           "type": "object",
           "properties": {

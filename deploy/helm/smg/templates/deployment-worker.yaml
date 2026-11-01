@@ -84,7 +84,7 @@ spec:
             limits:
               {{ $gpuType }}: {{ $gpuCount }}
           {{- end }}
-          {{- if or $.Values.huggingface.token $worker.extraEnv $metricsPort }}
+          {{- if or $.Values.huggingface.token $worker.extraEnv $metricsPort $worker.servicerImpl }}
           env:
             {{- if $.Values.huggingface.token }}
             - name: HF_TOKEN
@@ -93,12 +93,22 @@ spec:
                   name: {{ include "smg.fullname" $ }}-hf-token
                   key: token
             {{- end }}
-            {{- if $metricsPort }}
-            {{- /* The engine's launcher reads the servicer implementation and
-                   the metrics listener's port from these variables (its
-                   --servicer-impl / --metrics-port flags override them). */}}
+            {{- /* The engine's launcher reads the servicer implementation from
+                   this variable (its --servicer-impl flag overrides it); unset,
+                   it runs its default, the Rust servicer. A worker's servicerImpl
+                   names one explicitly ("python" = the deprecated Python servicer,
+                   kept for the deprecation window); a metrics port names the Rust
+                   servicer, whose listener serves it. */}}
+            {{- if $worker.servicerImpl }}
+            - name: SMG_{{ upper $worker.engine }}_SERVICER_IMPL
+              value: {{ $worker.servicerImpl | quote }}
+            {{- else if $metricsPort }}
             - name: SMG_{{ upper $worker.engine }}_SERVICER_IMPL
               value: "rust"
+            {{- end }}
+            {{- if $metricsPort }}
+            {{- /* The Rust servicer's metrics listener port (the launcher's
+                   --metrics-port flag overrides it). */}}
             - name: SMG_{{ upper $worker.engine }}_SERVICER_METRICS_PORT
               value: {{ $metricsPort | quote }}
             {{- end }}

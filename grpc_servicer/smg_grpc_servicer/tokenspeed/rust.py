@@ -162,8 +162,9 @@ def servicer_impl_source(
     """:func:`resolve_servicer_impl`'s answer with where it came from:
     ``flag``, ``env`` or ``default`` (the shared
     :func:`~smg_grpc_servicer.rust_lifecycle.servicer_switch`, which writes a
-    flag decision back to the environment the scheduler processes inherit)."""
-    return servicer_switch(SERVICER_IMPL_ENV, args, environ)
+    flag decision back to the environment the scheduler processes inherit;
+    this launcher's default is still the Python servicer)."""
+    return servicer_switch(SERVICER_IMPL_ENV, args, environ, default="python")
 
 
 # ---------------------------------------------------------------------------

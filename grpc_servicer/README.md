@@ -246,18 +246,20 @@ contract from `smg.servicer.VllmGrpcServer` on a Rust-owned thread. The
 Router cannot tell the two apart.
 
 ```bash
-# Python (default): upstream's gRPC server, AsyncLLM in-process.
+# Rust request path (the default), same entrypoint as upstream's gRPC server.
 vllm serve Qwen/Qwen3-0.6B --grpc --port 50051
 
-# Rust request path, same entrypoint. The flag is this package's: vLLM loads
-# it as a general plugin while it builds the parser (smg_grpc_servicer/vllm/plugin.py);
-# the stock launcher's own parser (`python -m` below) takes it too.
-vllm serve Qwen/Qwen3-0.6B --grpc --port 50051 --servicer-impl rust
+# The deprecated Python servicer (upstream's gRPC server, AsyncLLM in-process),
+# selected explicitly; the launcher logs its deprecation.
+# The flag is this package's: vLLM loads it as a general plugin while it builds
+# the parser (smg_grpc_servicer/vllm/plugin.py); the stock launcher's own parser
+# (`python -m` below) takes it too.
+vllm serve Qwen/Qwen3-0.6B --grpc --port 50051 --servicer-impl python
 
 # The environment form, as a deployment sets it, works for every entry: `vllm serve --grpc`,
 # and `python -m` on the launcher module (`vllm.entrypoints.grpc_server` is the launcher itself
 # on vLLM 0.28 and 0.29, and from 0.30 a shim importing `vllm.entrypoints.launchers.grpc_server`).
-SMG_VLLM_SERVICER_IMPL=rust python -m vllm.entrypoints.grpc_server --model Qwen/Qwen3-0.6B --port 50051
+SMG_VLLM_SERVICER_IMPL=python python -m vllm.entrypoints.grpc_server --model Qwen/Qwen3-0.6B --port 50051
 ```
 
 What the switch runs ahead of `serve_grpc` is the check a launcher could also
@@ -323,7 +325,8 @@ refuses the flag with one line.
 The CPU smoke behind that table (`scripts/launcher_switch_smoke.py`) runs each
 launcher through to the servicer construction against a stub engine, in a
 fresh interpreter per case, and checks that Rust takes the process before any
-engine exists and that the Python default still constructs the servicer:
+engine exists and that the Python servicer, chosen explicitly, still constructs
+the servicer:
 
 ```bash
 # The vendored upstream launchers (tests/launchers/, one per layout); no vLLM needed.
@@ -1169,19 +1172,20 @@ below, the Rust server speaks the gRPC contract on top of it, and Python keeps
 the lifecycle only. The flag is this package's, as it is for vLLM: SGLang
 loads it as an `sglang.srt.plugins` entry point while it builds its parser
 (`smg_grpc_servicer/sglang/plugin.py`), and `SMG_SGLANG_SERVICER_IMPL` is the
-fallback the flag overrides (flag, then the environment, then `python`; the
-servicer logs which one decided). A `SGLANG_PLUGINS` whitelist without
+fallback the flag overrides (flag, then the environment, then `rust`; the
+servicer logs which one decided, and a `python` chosen by either logs the
+deprecation line). A `SGLANG_PLUGINS` whitelist without
 `smg-servicer` removes the flag, not the environment form.
 
 ```bash
-# Python (default)
+# Rust request path (the default)
 sglang serve --model-path Qwen/Qwen3-0.6B --grpc-mode --port 30000
 
-# Rust request path, same entrypoint
-sglang serve --model-path Qwen/Qwen3-0.6B --grpc-mode --port 30000 --servicer-impl rust
+# The deprecated Python servicer, same entrypoint (the launcher logs the deprecation)
+sglang serve --model-path Qwen/Qwen3-0.6B --grpc-mode --port 30000 --servicer-impl python
 
 # The environment form, overridden by the flag when both are given
-SMG_SGLANG_SERVICER_IMPL=rust sglang serve --model-path Qwen/Qwen3-0.6B --grpc-mode --port 30000
+SMG_SGLANG_SERVICER_IMPL=python sglang serve --model-path Qwen/Qwen3-0.6B --grpc-mode --port 30000
 ```
 
 `python -m sglang.launch_server --help` lists the flag; `sglang serve --help`
