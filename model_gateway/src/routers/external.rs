@@ -1,12 +1,13 @@
 //! The gateway's side of the external-router contract: what a third-party
 //! router gets to see of the gateway, and how one is mounted as a router.
 
-use std::{any::Any, fmt, sync::Arc, time::Duration};
+use std::{any::Any, fmt, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use openai_protocol::{
     chat::ChatCompletionRequest,
+    common::GenerationRequest,
     interactions::InteractionsRequest,
     messages::CreateMessageRequest,
     realtime_session::{
@@ -21,10 +22,17 @@ use smg_external_router::{
     ExternalContext, ExternalRouter, ExternalRouterSpec, RetryConfig,
 };
 
-use super::{common::worker_selection::WorkerSelector, RouterTrait};
+use super::{
+    common::worker_selection::WorkerSelector,
+    grpc::utils::{error_reason_for_response, error_type_for_response, route_to_endpoint},
+    http::tenant_rate_limit::{self, TenantCharge},
+    RouterTrait,
+};
 use crate::{
     app_context::AppContext,
     middleware::TenantRequestMeta,
+    observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
+    rate_limit::RateLimitManager,
     worker::{RuntimeType, Worker, WorkerLoadGuard, WorkerRegistry},
 };
 
@@ -161,6 +169,10 @@ pub fn external_context(ctx: &AppContext) -> ExternalContext {
 pub struct ExternalRouterAdapter {
     spec: ExternalRouterSpec,
     inner: Arc<dyn ExternalRouter>,
+    /// The tenant rate limiter, when configured: every route that charges a
+    /// tenant reserves through it before the router dispatches
+    /// ([`Self::route_reserved`]).
+    rate_limit_manager: Option<Arc<RateLimitManager>>,
 }
 
 impl ExternalRouterAdapter {
@@ -170,11 +182,85 @@ impl ExternalRouterAdapter {
         ctx: &AppContext,
     ) -> Result<Box<dyn RouterTrait>, String> {
         let inner = (spec.build)(external_context(ctx)).await?;
-        Ok(Box::new(Self { spec, inner }))
+        Ok(Box::new(Self {
+            spec,
+            inner,
+            rate_limit_manager: ctx.rate_limit_manager.clone(),
+        }))
     }
 
     pub fn spec(&self) -> &ExternalRouterSpec {
         &self.spec
+    }
+
+    /// Route `request` through the provider router under the tenant's
+    /// reservation, as the gateway's own HTTP routers route theirs: reserved
+    /// once before the dispatch, resolved once on the router's answer
+    /// (`tenant_rate_limit`). A denied request never reaches the provider
+    /// router, so its request and its refusal are counted here.
+    async fn route_reserved<T, F, Fut>(
+        &self,
+        tenant_meta: &TenantRequestMeta,
+        request: T,
+        route: &'static str,
+        model_id: &str,
+        dispatch: F,
+    ) -> Response
+    where
+        T: TenantCharge + Send,
+        F: FnOnce(T) -> Fut + Send,
+        Fut: Future<Output = Response> + Send,
+    {
+        let is_stream = request.is_stream();
+        let (reservation, denial) = tenant_rate_limit::reserve(
+            self.rate_limit_manager.as_deref(),
+            Some(tenant_meta),
+            &request,
+            model_id,
+            None,
+        )
+        .await;
+        let response = match denial {
+            Some(denied) => {
+                self.record_denied(model_id, route, is_stream, &denied);
+                denied
+            }
+            None => dispatch(request).await,
+        };
+        // A buffered answer is the provider's body, held whole already (the
+        // router read it without a bound), so the re-read is unbounded.
+        tenant_rate_limit::resolve(reservation.as_ref(), route, is_stream, response, usize::MAX)
+            .await
+    }
+
+    /// Count a request the tenant limit refused ahead of the provider
+    /// router, which counts the ones it dispatches: the request under the
+    /// router's type (`router_type`, the name the router gives itself) with
+    /// backend `external` and the route's endpoint, and the refusal under its
+    /// class and reason. The OpenAI-compatible router counts its dispatched
+    /// traffic under that same type; the Anthropic router counts its own
+    /// under the HTTP router's type and the Gemini router counts none, so a
+    /// refusal of theirs is the first series under their own name.
+    fn record_denied(&self, model_id: &str, route: &str, is_stream: bool, denied: &Response) {
+        let router_type = self.inner.router_type();
+        let endpoint = route_to_endpoint(route);
+        Metrics::record_router_request(
+            router_type,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            endpoint,
+            bool_to_static_str(is_stream),
+        );
+        Metrics::record_router_error(
+            router_type,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            endpoint,
+            error_type_for_response(denied),
+            error_reason_for_response(denied),
+        );
     }
 }
 
@@ -212,9 +298,14 @@ impl RouterTrait for ExternalRouterAdapter {
         body: ChatCompletionRequest,
         model_id: &str,
     ) -> Response {
-        self.inner
-            .route_chat(headers, tenant_meta, body, model_id)
-            .await
+        self.route_reserved(
+            tenant_meta,
+            body,
+            "/v1/chat/completions",
+            model_id,
+            |body| self.inner.route_chat(headers, tenant_meta, body, model_id),
+        )
+        .await
     }
 
     async fn route_responses(
@@ -224,9 +315,11 @@ impl RouterTrait for ExternalRouterAdapter {
         body: ResponsesRequest,
         model_id: &str,
     ) -> Response {
-        self.inner
-            .route_responses(headers, tenant_meta, body, model_id)
-            .await
+        self.route_reserved(tenant_meta, body, "/v1/responses", model_id, |body| {
+            self.inner
+                .route_responses(headers, tenant_meta, body, model_id)
+        })
+        .await
     }
 
     async fn route_messages(
@@ -236,9 +329,11 @@ impl RouterTrait for ExternalRouterAdapter {
         body: CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        self.inner
-            .route_messages(headers, tenant_meta, body, model_id)
-            .await
+        self.route_reserved(tenant_meta, body, "/v1/messages", model_id, |body| {
+            self.inner
+                .route_messages(headers, tenant_meta, body, model_id)
+        })
+        .await
     }
 
     async fn route_interactions(
@@ -248,9 +343,17 @@ impl RouterTrait for ExternalRouterAdapter {
         body: InteractionsRequest,
         model_id: Option<&str>,
     ) -> Response {
-        self.inner
-            .route_interactions(headers, tenant_meta, body, model_id)
-            .await
+        // The charge is keyed by the model the route named, else the one the
+        // request names.
+        let model = model_id
+            .or_else(|| body.get_model())
+            .unwrap_or_default()
+            .to_owned();
+        self.route_reserved(tenant_meta, body, "/v1/interactions", &model, |body| {
+            self.inner
+                .route_interactions(headers, tenant_meta, body, model_id)
+        })
+        .await
     }
 
     async fn route_realtime_session(
