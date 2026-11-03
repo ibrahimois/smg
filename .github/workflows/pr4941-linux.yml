@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr4941-linux-validation
+  group: pr4941-linux-validation-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: be645c90dd3d41a0deec1367eb12906d1cdc2bd5
+          ref: c57daec25a3629bb155ef91bf3011f6f0a9121c6
           persist-credentials: false
       - name: Record tested source
         run: git rev-parse HEAD
