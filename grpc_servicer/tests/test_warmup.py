@@ -1581,6 +1581,34 @@ def test_a_lone_legs_plan_marks_every_request_and_says_so():
     assert "stand-in bootstrap" not in plain.describe()
 
 
+@pytest.mark.parametrize("level", ["fast", "full"])
+@pytest.mark.parametrize("ranks", [1, 2])
+def test_an_engine_that_runs_prefill_alone_plans_the_ladder_without_a_staircase(level, ranks):
+    # The prefill side of a disaggregated pair never decodes: its plan has no
+    # decode staircase, and every step of it is one request per rank, so at
+    # most a rank's worth of stand-in transfers and their KV is ever held at
+    # once (a window's worth was, on an engine that keeps each transfer's KV
+    # until it is sent, enough to run its pool dry before the ladder's top).
+    lone = dataclasses.replace(SMALL, lone_leg_bootstrap="2.2.2.2", data_parallel_size=ranks)
+    prefill_only = plan_warmup(dataclasses.replace(lone, prefill_only=True), level)
+    both = plan_warmup(lone, level)
+    assert [s.kind for s in both.steps][:ranks] == ["decode"] * ranks
+    assert [s.kind for s in prefill_only.steps] == [s.kind for s in both.steps][ranks:]
+    assert [s.name for s in prefill_only.steps] == [s.name for s in both.steps][ranks:]
+    assert max(len(s.requests) for s in prefill_only.steps) == ranks
+    assert {r.lone_leg_bootstrap for s in prefill_only.steps for r in s.requests} == {"2.2.2.2"}
+    assert {r.max_tokens for s in prefill_only.steps for r in s.requests} == {1}
+    assert "0 decode staircases" in prefill_only.describe()
+    assert "no decode staircase: this engine runs prefill alone" in prefill_only.describe()
+    assert "runs prefill alone" not in both.describe()
+    # A single engine and the decode side keep the staircase: the flag alone
+    # removes it, never the stand-in bootstrap.
+    assert (
+        plan_warmup(dataclasses.replace(SMALL, prefill_only=True), level).steps[0].kind == "prefill"
+    )
+    assert plan_warmup(SMALL, level).steps[0].kind == "decode"
+
+
 def test_the_sglang_inputs_come_from_the_server_arguments_and_the_facts(monkeypatch, caplog):
     args = SimpleNamespace(max_running_requests=64, chunked_prefill_size=8192, context_length=None)
     facts = {"is_generation": True, "max_context_length": 32768, "vocab_size": 151936}
@@ -1615,12 +1643,17 @@ def test_the_sglang_inputs_come_from_the_server_arguments_and_the_facts(monkeypa
         leg = sglang_warmup.warmup_inputs(SimpleNamespace(disaggregation_mode=role), facts)
         assert leg.lone_leg_bootstrap == "2.2.2.2"
         assert leg.max_num_batched_tokens == sglang_warmup.DEFAULT_STEP_TOKENS
+        # The prefill side runs prefill alone (its decode steps are its
+        # peer's): no decode staircase there; the decode side keeps it.
+        assert leg.prefill_only is (role == "prefill")
         # A leg of two ranks plans both, each request pinned to its rank.
         two = sglang_warmup.warmup_inputs(
             SimpleNamespace(disaggregation_mode=role, dp_size=2), facts
         )
         assert (two.data_parallel_size, two.lone_leg_bootstrap) == (2, "2.2.2.2")
-    assert sglang_warmup.warmup_inputs(SimpleNamespace(), facts).lone_leg_bootstrap is None
+        assert two.prefill_only is (role == "prefill")
+    single = sglang_warmup.warmup_inputs(SimpleNamespace(), facts)
+    assert single.lone_leg_bootstrap is None and single.prefill_only is False
     # An aggregated engine of two ranks plans both on the wire that pins; on
     # the Python servicer's wire, which forwards no pin, the plan is one
     # rank's and a WARNING says the other rank pays the first-time cost.

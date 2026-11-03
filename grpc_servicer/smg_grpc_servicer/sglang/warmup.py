@@ -18,7 +18,11 @@ does: its requests carry the engine's own stand-in bootstrap (what the
 engine's warm-up sets in disaggregation mode: the fake-transfer host and room
 0), a transfer to nobody on either side, so the leg warms up without its peer
 and no first request of a prompt-length class pays a kernel compile under the
-Router's prefill-liveness bound.
+Router's prefill-liveness bound. The prefill side plans no decode staircase
+(:attr:`WarmupInputs.prefill_only`): its decode steps run on its peer, and
+the staircase's window of concurrent stand-in requests would only hold that
+many transfers and their KV at once on an engine that keeps each transfer's
+KV until it is sent; its plan is the prefill ladder, one request at a time.
 The language side of an encode-disaggregated deployment (``--language-only``)
 plans as a single engine: a text warm-up request carries no media, so it
 reaches the scheduler untouched and the encoders see nothing of it, and the
@@ -82,7 +86,8 @@ def warmup_inputs(
     sizes it itself), the step budget (the chunk size under chunked prefill,
     else the prefill budget, else the engine's default), the context, and on
     a prefill or decode leg the engine's stand-in bootstrap host for the
-    requests to carry. ``None`` for a model that generates nothing and for the
+    requests to carry (the prefill side, which runs prefill alone, gets no
+    decode staircase). ``None`` for a model that generates nothing and for the
     encoder-only role, which the engine runs on its own server; the language
     side of an encode-disaggregated deployment plans as a single engine (its
     warm-up requests carry no media). On a wire that carries the rank pin
@@ -125,6 +130,8 @@ def warmup_inputs(
         source="window and step from the server arguments (the engine's default step when unset)",
         data_parallel_size=ranks,
         lone_leg_bootstrap=lone_leg_bootstrap,
+        # The prefill side never decodes: its decode steps are its peer's.
+        prefill_only=args.disaggregation_mode == "prefill",
     )
 
 
