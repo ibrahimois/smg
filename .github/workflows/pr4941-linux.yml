@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 7dd19128003f210a3dab14c3a56684d0f6301d61
+          ref: 4a1bf653632319904542071159ece86daf6fedac
           persist-credentials: false
       - name: Record tested source
         run: git rev-parse HEAD
