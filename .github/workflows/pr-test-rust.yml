@@ -1621,6 +1621,7 @@ jobs:
           - engine: sglang
             timeout: 40
             min_selected: 15 # floor ≈ 95% of measured effective (e2e audit 2026-08-21)
+            servicer_impl: rust # temporary probe for this change: the row on the Rust servicer (dropped before review)
           # The vLLM rows' job budget sits above the sum of their steps: the
           # engine setup takes 3 to 9 minutes (its packages come from the
           # network), the test step has 34, checkout, downloads, diagnostics
