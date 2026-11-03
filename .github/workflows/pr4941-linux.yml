@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: c57daec25a3629bb155ef91bf3011f6f0a9121c6
+          ref: 7dd19128003f210a3dab14c3a56684d0f6301d61
           persist-credentials: false
       - name: Record tested source
         run: git rev-parse HEAD
@@ -54,9 +54,9 @@ jobs:
           set -o pipefail
           cargo test -p openai-protocol --lib 2>&1 | tee validation-logs/protocol.log
           cargo test -p smg --lib -- endpoints::models:: workflow::steps::local::create_worker:: workflow::steps::local::discover_metadata:: 2>&1 | tee validation-logs/metadata.log
+          cargo test --workspace --test api_tests -- model_info_tests 2>&1 | tee validation-logs/catalog-integration.log
       - name: Full workspace tests
         id: workspace
-        continue-on-error: true
         timeout-minutes: 50
         run: |
           set -o pipefail
@@ -64,7 +64,6 @@ jobs:
       - name: Workspace lint without optional OpenCV
         if: success() || failure()
         id: lint
-        continue-on-error: true
         timeout-minutes: 15
         run: |
           set -o pipefail
@@ -72,7 +71,6 @@ jobs:
       - name: Python binding build and import
         if: success() || failure()
         id: python
-        continue-on-error: true
         timeout-minutes: 15
         run: |
           set -o pipefail
