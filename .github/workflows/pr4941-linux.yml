@@ -1,0 +1,99 @@
+name: PR 4941 Linux validation
+
+on:
+  push:
+    branches: [test/pr-4941-linux-validation]
+    paths: [.github/workflows/pr4941-linux.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr4941-linux-validation
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: be645c90dd3d41a0deec1367eb12906d1cdc2bd5
+          persist-credentials: false
+      - name: Record tested source
+        run: git rev-parse HEAD
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: System dependencies and Rust
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev pkg-config protobuf-compiler ffmpeg
+          rustup toolchain install 1.98.0 --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+          rustc --version
+          mkdir -p validation-logs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr4941-linux
+          cache-on-failure: true
+      - name: Formatting
+        run: cargo +nightly fmt --all -- --check
+      - name: WASM fixtures
+        run: bash crates/wasm/tests/fixtures/build_fixtures.sh
+      - name: Focused protocol and gateway regressions
+        timeout-minutes: 50
+        run: |
+          set -o pipefail
+          cargo test -p openai-protocol --lib 2>&1 | tee validation-logs/protocol.log
+          cargo test -p smg --lib -- endpoints::models:: workflow::steps::local::create_worker:: workflow::steps::local::discover_metadata:: 2>&1 | tee validation-logs/metadata.log
+      - name: Full workspace tests
+        id: workspace
+        continue-on-error: true
+        timeout-minutes: 50
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee validation-logs/workspace-tests.log
+      - name: Workspace lint without optional OpenCV
+        if: success() || failure()
+        id: lint
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee validation-logs/clippy.log
+      - name: Python binding build and import
+        if: success() || failure()
+        id: python
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          python -m venv /tmp/smg-validation-venv
+          source /tmp/smg-validation-venv/bin/activate
+          pip install maturin
+          make python-dev JOBS=2 2>&1 | tee validation-logs/python.log
+          python -c 'import smg.smg_rs'
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr4941-linux-validation
+          path: validation-logs/
+      - name: Require every validation step to pass
+        if: success() || failure()
+        env:
+          WORKSPACE_RESULT: ${{ steps.workspace.outcome }}
+          LINT_RESULT: ${{ steps.lint.outcome }}
+          PYTHON_RESULT: ${{ steps.python.outcome }}
+        run: |
+          test "$WORKSPACE_RESULT" = success
+          test "$LINT_RESULT" = success
+          test "$PYTHON_RESULT" = success
