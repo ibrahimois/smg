@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ccad6f657b1a240836e819f85730401e4db60345
+          ref: a98f65b679ee4810167dc2d0a219f53ecbd1e0db
           persist-credentials: false
       - name: Record tested source
         run: git rev-parse HEAD
@@ -53,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p smg-worker -p openai-protocol --features openai-protocol/axum --lib 2>&1 | tee validation-logs/protocol.log
-          cargo test --locked -p smg --lib -- endpoints::models:: workflow::steps::local::create_worker:: workflow::steps::local::discover_metadata:: workflow::steps::local::update_worker_properties:: 2>&1 | tee validation-logs/metadata.log
+          cargo test --locked -p smg --lib -- endpoints::models:: workflow::steps::local::create_worker:: workflow::steps::local::discover_metadata:: workflow::steps::local::update_worker_properties:: workflow::steps::local::detect_backend:: 2>&1 | tee validation-logs/metadata.log
           cargo test --locked -p smg --test api_tests -- model_info_tests single_model_tests 2>&1 | tee validation-logs/catalog-integration.log
       - name: Full workspace tests
         id: workspace
