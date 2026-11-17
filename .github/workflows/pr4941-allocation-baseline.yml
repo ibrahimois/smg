@@ -1,0 +1,108 @@
+name: PR 4941 allocation baseline
+
+on:
+  push:
+    branches: [test/pr-4941-linux-validation]
+    paths: [.github/workflows/pr4941-allocation-baseline.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  allocation-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - label: main
+            sha: 411ce8ea8f25a44746c7adafdd5e142ebeb7d979
+          - label: pr
+            sha: c4b9310be1d7542c8d09a17135134aa58ddbcc9f
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.source.sha }}
+          persist-credentials: false
+      - name: Record tested source
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source.sha }}
+        run: |
+          mkdir -p validation-logs
+          git rev-parse HEAD | tee validation-logs/source.txt
+          test "$(cat validation-logs/source.txt)" = "$EXPECTED_SOURCE"
+          git status --porcelain
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: System dependencies and Rust
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev pkg-config protobuf-compiler ffmpeg
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc --version
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr4941-linux
+          cache-on-failure: true
+      - name: WASM fixtures
+        run: bash crates/wasm/tests/fixtures/build_fixtures.sh
+      - name: Build the full workspace test graph
+        id: build
+        timeout-minutes: 80
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --no-fail-fast --no-run --message-format=json > validation-logs/build.jsonl 2> validation-logs/build-stderr.log
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          executables = set()
+          for line in Path("validation-logs/build.jsonl").read_text().splitlines():
+              item = json.loads(line)
+              if (item.get("reason") == "compiler-artifact"
+                      and item.get("target", {}).get("name") == "smg_external_router"
+                      and item.get("profile", {}).get("test")
+                      and item.get("executable")):
+                  executables.add(item["executable"])
+          if len(executables) != 1:
+              raise SystemExit(f"Expected one external-router test binary, got {executables}")
+          binary = str(Path(executables.pop()).resolve())
+          Path("validation-logs/test-binary.txt").write_text(binary)
+          listing = subprocess.check_output([binary, "--list"], cwd="crates/external_router", text=True)
+          Path("validation-logs/test-list.txt").write_text(listing)
+          expected_test = "openai::mcp::tool_loop::tests::the_tool_descriptors_copy_each_schema_once: test"
+          if expected_test not in listing.splitlines():
+              raise SystemExit("Allocation test missing from the selected binary")
+          count = sum(line.endswith(": test") for line in listing.splitlines())
+          if count != 452:
+              raise SystemExit(f"Expected 452 library tests, got {count}")
+          PY
+      - name: Run the complete external-router library suite
+        id: library
+        working-directory: crates/external_router
+        run: |
+          set -o pipefail
+          allocation_test_binary="$(cat ../../validation-logs/test-binary.txt)"
+          "$allocation_test_binary" --nocapture 2>&1 | tee ../../validation-logs/library-tests.log
+      - name: Run the allocation test in isolation
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        working-directory: crates/external_router
+        run: |
+          set -o pipefail
+          allocation_test_binary="$(cat ../../validation-logs/test-binary.txt)"
+          "$allocation_test_binary" openai::mcp::tool_loop::tests::the_tool_descriptors_copy_each_schema_once --exact --nocapture 2>&1 | tee ../../validation-logs/isolated-allocation.log
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr4941-allocation-${{ matrix.source.label }}
+          path: validation-logs/
